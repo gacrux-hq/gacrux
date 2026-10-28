@@ -1,0 +1,83 @@
+name: Publish GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  enable:
+    runs-on: ubuntu-latest
+    outputs:
+      build_type: ${{ steps.pages.outputs.build_type }}
+    steps:
+      - name: Enable Pages from main /
+        id: pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY}"
+
+          if gh api "repos/${repo}/pages" > /tmp/pages.json 2>/tmp/pages.err; then
+            echo "Pages site already exists"
+            cat /tmp/pages.json
+            build_type="$(jq -r '.build_type' /tmp/pages.json)"
+            echo "build_type=${build_type}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "GET /pages failed:"
+          cat /tmp/pages.err
+
+          if gh api --method POST "repos/${repo}/pages" --input - > /tmp/create.json <<'EOF'
+          {"build_type":"legacy","source":{"branch":"main","path":"/"}}
+          EOF
+          then
+            echo "Enabled legacy Pages from main /"
+            cat /tmp/create.json
+            echo "build_type=legacy" >> "$GITHUB_OUTPUT"
+            gh api --method POST "repos/${repo}/pages/builds" || true
+            exit 0
+          fi
+
+          echo "Legacy enablement failed; trying GitHub Actions as the Pages source"
+          gh api --method POST "repos/${repo}/pages" --input - > /tmp/create.json <<'EOF'
+          {"build_type":"workflow"}
+          EOF
+          cat /tmp/create.json
+          echo "build_type=workflow" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: enable
+    if: needs.enable.outputs.build_type == 'workflow'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Package static site
+        run: |
+          mkdir -p _site
+          cp index.html gacrux-logo.png _site/
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
